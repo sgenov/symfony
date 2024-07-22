@@ -39,6 +39,8 @@ class Connection
         'dbindex' => 0,
         'tls' => false,
         'redeliver_timeout' => 3600, // Timeout before redeliver messages still in pending state (seconds)
+        'timeout' => 0.0, // Float, value in seconds (optional, default is 0 meaning unlimited)
+        'read_timeout' => 0.0, //  Float, value in seconds (optional, default is 0 meaning unlimited)
         'claim_interval' => 60000, // Interval by which pending/abandoned messages should be checked
         'lazy' => false,
         'auth' => null,
@@ -76,18 +78,20 @@ class Connection
         if ('' === $auth) {
             $auth = null;
         }
+        $timeout = ($configuration['timeout'] ?? self::DEFAULT_OPTIONS['timeout']);
+        $readTimeout = ($configuration['read_timeout'] ?? self::DEFAULT_OPTIONS['timeout']);
 
         $lazy = $configuration['lazy'] ?? self::DEFAULT_OPTIONS['lazy'];
         if (\is_array($host) || $redis instanceof \RedisCluster) {
             $hosts = \is_string($host) ? [$host.':'.$port] : $host; // Always ensure we have an array
-            $initializer = static function ($redis) use ($hosts, $auth, $serializer) {
-                return self::initializeRedisCluster($redis, $hosts, $auth, $serializer);
+            $initializer = static function ($redis) use ($hosts, $auth, $serializer, $timeout, $readTimeout) {
+                return self::initializeRedisCluster($redis, $hosts, $auth, $serializer, $timeout, $readTimeout);
             };
             $redis = $lazy ? new RedisClusterProxy($redis, $initializer) : $initializer($redis);
         } else {
             $redis = $redis ?? new \Redis();
-            $initializer = static function ($redis) use ($host, $port, $auth, $serializer, $dbIndex) {
-                return self::initializeRedis($redis, $host, $port, $auth, $serializer, $dbIndex);
+            $initializer = static function ($redis) use ($host, $port, $auth, $serializer, $dbIndex, $timeout, $readTimeout) {
+                return self::initializeRedis($redis, $host, $port, $auth, $serializer, $dbIndex, $timeout, $readTimeout);
             };
             $redis = $lazy ? new RedisProxy($redis, $initializer) : $initializer($redis);
         }
@@ -115,13 +119,13 @@ class Connection
     /**
      * @param string|string[]|null $auth
      */
-    private static function initializeRedis(\Redis $redis, string $host, int $port, $auth, int $serializer, int $dbIndex): \Redis
+    private static function initializeRedis(\Redis $redis, string $host, int $port, $auth, int $serializer, int $dbIndex, float $timeout, float $readTimeout): \Redis
     {
         if ($redis->isConnected()) {
             return $redis;
         }
 
-        $redis->connect($host, $port);
+        $redis->connect($host, $port, $timeout, null, 0, $readTimeout);
         $redis->setOption(\Redis::OPT_SERIALIZER, $serializer);
 
         if (null !== $auth && !$redis->auth($auth)) {
@@ -138,10 +142,10 @@ class Connection
     /**
      * @param string|string[]|null $auth
      */
-    private static function initializeRedisCluster(?\RedisCluster $redis, array $hosts, $auth, int $serializer): \RedisCluster
+    private static function initializeRedisCluster(?\RedisCluster $redis, array $hosts, $auth, int $serializer, float $timeout, float $readTimeout): \RedisCluster
     {
         if (null === $redis) {
-            $redis = new \RedisCluster(null, $hosts, 0.0, 0.0, false, $auth);
+            $redis = new \RedisCluster(null, $hosts, $timeout, $readTimeout, false, $auth);
         }
 
         $redis->setOption(\Redis::OPT_SERIALIZER, $serializer);
@@ -228,6 +232,18 @@ class Connection
             unset($redisOptions['claim_interval']);
         }
 
+        $timeout = null;
+        if (\array_key_exists('timeout', $redisOptions)) {
+            $timeout = filter_var($redisOptions['timeout'], \FILTER_VALIDATE_FLOAT);
+            unset($redisOptions['timeout']);
+        }
+
+        $readTimeout = null;
+        if (\array_key_exists('read_timeout', $redisOptions)) {
+            $readTimeout = filter_var($redisOptions['read_timeout'], \FILTER_VALIDATE_FLOAT);
+            unset($redisOptions['read_timeout']);
+        }
+
         $configuration = [
             'stream' => $redisOptions['stream'] ?? null,
             'group' => $redisOptions['group'] ?? null,
@@ -240,6 +256,8 @@ class Connection
             'dbindex' => $dbIndex,
             'redeliver_timeout' => $redeliverTimeout,
             'claim_interval' => $claimInterval,
+            'timeout' => $timeout,
+            'read_timeout' => $readTimeout
         ];
 
         if (isset($params['host'])) {
